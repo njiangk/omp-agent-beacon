@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Live observability views for oh-my-pi sessions.",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "plugins": [
     {
       "name": "agent-beacon",
       "description": "Live terminal diagram of an omp session: main model, subagents, advisor reviews, tools, tokens and cost.",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "source": "./",
       "category": "observability",
       "homepage": "https://github.com/njiangk/omp-agent-beacon",

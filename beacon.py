@@ -837,12 +837,14 @@ def main():
         print('\n'.join(render(state, args.width, args.height, 30, mode).lines(False)))
         return
     if args.frames:
+        if termios is None or tty is None:
+            parser.error('--frames requires a POSIX terminal (macOS/Linux) because it selects on a pipe; use --snapshot')
         stream_frames(state, update, mode, args.width, args.height)
         return
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         parser.error('interactive mode requires a terminal; use --snapshot for plain output')
     if termios is None or tty is None:
-        parser.error('interactive mode requires a POSIX terminal (macOS/Linux); use --snapshot, or the omp overlay')
+        parser.error('interactive mode requires a POSIX terminal (macOS/Linux); use --snapshot')
     old = termios.tcgetattr(sys.stdin)
     paused, page, frame = False, 0, 0
     previous = []

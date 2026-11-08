@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python3 -m unittest test_omp.py -v
+      - name: Snapshot renders at the minimum size
+        run: python3 beacon.py --demo --snapshot --width 86 --height 44 > /dev/null
+      - name: Marketplace catalog is valid JSON
+        run: python3 -c "import json; json.load(open('.omp-plugin/marketplace.json')); json.load(open('package.json'))"

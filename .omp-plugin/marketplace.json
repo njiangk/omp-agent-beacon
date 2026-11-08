@@ -1,0 +1,29 @@
+{
+  "name": "omp-agent-beacon",
+  "owner": {
+    "name": "njiangk"
+  },
+  "metadata": {
+    "description": "Live observability views for oh-my-pi sessions.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-beacon",
+      "description": "Live terminal diagram of an omp session: main model, subagents, advisor reviews, tools, tokens and cost.",
+      "version": "0.2.0",
+      "source": "./",
+      "category": "observability",
+      "homepage": "https://github.com/njiangk/omp-agent-beacon",
+      "repository": "https://github.com/njiangk/omp-agent-beacon",
+      "license": "MIT",
+      "keywords": [
+        "observability",
+        "subagents",
+        "advisor",
+        "tokens",
+        "cost"
+      ]
+    }
+  ]
+}

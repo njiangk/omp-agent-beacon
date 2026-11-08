@@ -1,0 +1,26 @@
+{
+  "name": "omp-agent-beacon",
+  "version": "0.2.0",
+  "description": "Live terminal diagram of an omp session: main model, subagents, advisor reviews, tools, tokens and cost.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "extension",
+    "observability",
+    "tui"
+  ],
+  "files": [
+    "omp-extension.ts",
+    "native-view.ts",
+    "beacon.py",
+    "README.md",
+    "LICENSE"
+  ],
+  "omp": {
+    "extensions": [
+      "./omp-extension.ts"
+    ]
+  }
+}

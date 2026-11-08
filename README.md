@@ -1,12 +1,18 @@
 # Agent Beacon
 
+[![ci](https://github.com/njiangk/omp-agent-beacon/actions/workflows/ci.yml/badge.svg)](https://github.com/njiangk/omp-agent-beacon/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/njiangk/omp-agent-beacon)](https://github.com/njiangk/omp-agent-beacon/releases)
+
 ![Tern native panel](docs/preview-tern-native.png)
 
 ## English
 
 Agent Beacon draws a live diagram of an [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) session: the main model, its subagents, advisor reviews, tool activity, and the tokens/cost each agent used. It reads session JSONL files only; it never calls a model.
 
-Requirements: `omp` 18+, Python 3.9+. The native card view is provided by omp/Tern; any color terminal gets the character rendering.
+**What it is for** — `omp stats` answers "what have I spent?" with a historical web dashboard. Agent Beacon answers "what is happening right now?": which subagent is on which task, whether the advisor is being consulted, what each node has cost so far, and where the main model is blocked. It opens over the chat with `/beacon`, needs no server, and adds no hooks.
+
+Requirements: `omp` 18+, Python 3.9+, macOS or Linux. Windows can render `--snapshot`, but the interactive loop needs a POSIX terminal. The native card view is provided by omp/Tern; any color terminal gets the character rendering.
 
 Install as an omp plugin:
 
@@ -146,3 +152,5 @@ Tern 原生适配：移除固定 183 列回退导致的裁切，新增原生响�
 第一批优化：顾问栏改为真实审查时间线（从 `advise` 工具参数提取建议正文，不编造触发原因），顶栏加入角色配色图例，子任务卡片加编号并高亮当前活动卡片，真实模式用最近工具和已运行时长代替伪造进度，主会话显示“等待顾问 / 等待子任务”状态，日志按角色上色。字符画和 Tern 原生面板同步。
 
 第二批优化：新增 token 与费用展示。OMP 按每条 assistant 消息的 `usage` 累加 token/费用，Claude 按消息 ID 去重后累加 token（日志无价格），通用事件接口新增 `usage` 类型。角色卡片显示各自用量，执行总线显示合计；演示模式带合成用量。字符画和 Tern 原生面板同步。
+
+发布整理：新增 MIT 许可证、包清单与市场目录、CI、英文说明与徽章；移除启动器里的绝对路径；非 POSIX 平台不再在导入阶段崩溃，交互模式给出明确提示。定位说明与 `omp stats` 的分工：后者做历史用量网页看板，本插件回答“现在谁在做什么、卡在哪”。

@@ -10,10 +10,14 @@ from pathlib import Path
 import select
 import shutil
 import sys
-import termios
 import time
-import tty
 import unicodedata
+
+try:  # POSIX terminal control; absent on Windows.
+    import termios
+    import tty
+except ImportError:
+    termios = tty = None
 
 BG = (14, 21, 42)
 COLORS = {
@@ -837,6 +841,8 @@ def main():
         return
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         parser.error('interactive mode requires a terminal; use --snapshot for plain output')
+    if termios is None or tty is None:
+        parser.error('interactive mode requires a POSIX terminal (macOS/Linux); use --snapshot, or the omp overlay')
     old = termios.tcgetattr(sys.stdin)
     paused, page, frame = False, 0, 0
     previous = []

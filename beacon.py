@@ -225,7 +225,17 @@ class State:
         kind = event.get('type', '')
         if kind not in ('session', 'tool', 'agent_start', 'agent_end', 'advisor', 'done', 'error', 'progress', 'usage'):
             raise ValueError('unsupported event type: ' + str(kind))
-        agent_id = str(event.get('agent_id', 'main'))
+        if kind == 'usage':
+            tokens, cost = _number(event.get('tokens')), _number(event.get('cost'))
+            if (tokens is None and cost is None or
+                    'tokens' in event and tokens is None or 'cost' in event and cost is None):
+                raise ValueError('usage requires finite non-negative tokens and/or cost')
+        elif kind == 'progress':
+            completed, total = event.get('completed'), event.get('total')
+            if (_number(completed) is None or _number(total) is None or
+                    total <= 0 or completed > total):
+                raise ValueError('progress requires finite 0 <= completed <= total and total > 0')
+        agent_id = '__advisor' if kind == 'advisor' else str(event.get('agent_id', 'main'))
         if agent_id == 'main':
             target = self.main
         elif agent_id == '__advisor':
@@ -241,8 +251,6 @@ class State:
         if kind == 'usage':
             tokens = _number(event.get('tokens'))
             cost = _number(event.get('cost'))
-            if tokens is None and cost is None:
-                raise ValueError('usage requires a finite non-negative tokens or cost')
             if tokens is not None:
                 target.tokens += int(tokens)
             if cost is not None:
@@ -284,8 +292,6 @@ class State:
             target.state = 'error'
         elif kind == 'progress':
             completed, total = event.get('completed'), event.get('total')
-            if not isinstance(completed, (int, float)) or not isinstance(total, (int, float)) or not math.isfinite(completed) or not math.isfinite(total) or total <= 0 or not 0 <= completed <= total:
-                raise ValueError('progress requires finite 0 <= completed <= total and total > 0')
             target.progress = completed / total
         if kind != 'advisor':
             target.detail = clean(event.get('detail', event.get('tool', kind)))
@@ -309,6 +315,15 @@ class EventFile:
         self.path = Path(path)
         self.offset = 0
         self.identity = None
+
+    def replaced(self):
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return True
+        if self.identity is None:
+            return False
+        return (stat.st_dev, stat.st_ino) != self.identity or stat.st_size < self.offset
 
     def poll(self):
         stat = self.path.stat()
@@ -340,9 +355,13 @@ class ClaudeSource:
         self.session = None
         self.scan_at = 0
         self.tools = {}
+        self.pending = {}
         self.usage_seen = set()
 
     def poll(self, state):
+        if any(reader.replaced() for reader in self.readers.values()):
+            self.session, self.scan_at = None, 0
+            self.readers.clear()
         now = time.monotonic()
         if now >= self.scan_at:
             self.scan_at = now + 2
@@ -355,12 +374,14 @@ class ClaudeSource:
                 if session != self.session:
                     self.session = session
                     self.readers = {session: EventFile(session)}
-                    state.main = Agent('main')
+                    state.main = Agent('main', role='main')
                     state.agents.clear()
-                    state.advisor = Agent('advisor', state='not connected')
+                    state.advisor = Agent('advisor', state='not connected', role='advisor')
                     state.total = 0
                     state.logs.clear()
+                    state.reviews.clear()
                     self.tools.clear()
+                    self.pending.clear()
                     self.usage_seen.clear()
                     state.label = session.stem[:24]
                 subdir = session.parent / session.stem / 'subagents'
@@ -371,7 +392,7 @@ class ClaudeSource:
             for row in reader.poll():
                 kind = row.get('type')
                 if kind == 'error':
-                    state.event(row)
+                    state.event(dict(row, agent_id=agent_id))
                     continue
                 message = row.get('message', {})
                 if not isinstance(message, dict):
@@ -383,9 +404,10 @@ class ClaudeSource:
                     (state.main if agent_id == 'main' else state.agents[agent_id]).model = clean(message['model'])
                 if kind == 'assistant':
                     target = state.main if agent_id == 'main' else state.agents[agent_id]
-                    key = message.get('id') or row.get('uuid')
-                    if key is None or key not in self.usage_seen:
-                        if key is not None:
+                    message_id = message.get('id') or row.get('uuid')
+                    key = (agent_id, message_id)
+                    if message_id is None or key not in self.usage_seen:
+                        if message_id is not None:
                             self.usage_seen.add(key)
                         add_usage(target, message.get('usage'), 'input_tokens', 'output_tokens',
                                   'cache_read_input_tokens', 'cache_creation_input_tokens')
@@ -400,16 +422,26 @@ class ClaudeSource:
                         if not isinstance(args, dict):
                             args = {}
                         detail = args.get('file_path') or args.get('pattern') or args.get('description') or args.get('command') or ''
-                        self.tools[block.get('id')] = name
+                        call_id = block.get('id')
+                        key = (agent_id, call_id)
+                        if call_id and key in self.tools:
+                            continue
+                        if call_id:
+                            self.tools[key] = name
+                            self.pending.setdefault(agent_id, set()).add(call_id)
                         state.event({'type': 'tool', 'agent_id': agent_id, 'tool': name, 'detail': f'{name} · {clean(detail)[:160]}'})
                     elif block.get('type') == 'tool_result':
                         target = state.main if agent_id == 'main' else state.agents[agent_id]
-                        target.state = 'error' if block.get('is_error') else 'waiting'
-                        target.detail = self.tools.get(block.get('tool_use_id'), 'tool') + (' failed' if block.get('is_error') else ' returned')
+                        call_id = block.get('tool_use_id')
+                        pending = self.pending.setdefault(agent_id, set())
+                        pending.discard(call_id)
+                        target.state = 'error' if block.get('is_error') else 'running' if pending else 'waiting'
+                        target.detail = self.tools.get((agent_id, call_id), 'tool') + (' failed' if block.get('is_error') else ' returned')
                     elif block.get('type') == 'text' and kind == 'assistant':
                         target = state.main if agent_id == 'main' else state.agents[agent_id]
                         target.detail = clean(block.get('text', ''))[:160]
-                        target.state = 'responding'
+                        if not self.pending.get(agent_id):
+                            target.state = 'responding'
                 if message.get('stop_reason') == 'end_turn':
                     state.event({'type': 'done' if agent_id == 'main' else 'agent_end', 'agent_id': agent_id, 'detail': 'turn completed'})
 
@@ -426,6 +458,9 @@ class OmpSource:
         self.advice = {}
 
     def poll(self, state):
+        if any(reader.replaced() for reader in self.readers.values()):
+            self.session, self.scan_at = None, 0
+            self.readers.clear()
         now = time.monotonic()
         if now >= self.scan_at:
             self.scan_at = now + 1
@@ -513,15 +548,19 @@ class OmpSource:
                         if not isinstance(args, dict):
                             args = {}
                         if advisor and block.get('name') == 'advise':
-                            self.advice[(agent_id, block.get('id'))] = clean(args.get('note', ''))[:200]
+                            self.advice[(agent_id, block.get('id'))] = clean(args.get('note', ''))
                         detail = args.get('i') or args.get('path') or args.get('command') or args.get('description') or ''
                         self.tool(state, target, agent_id, block.get('id'), block.get('name', 'tool'), detail)
                     elif block.get('type') == 'text' and not self.pending.get(agent_id):
-                        target.state, target.detail = 'responding', clean(block.get('text', ''))[:160]
+                        if not advisor or state.reviews and state.reviews[-1].active:
+                            text = clean(block.get('text', ''))
+                            target.state, target.detail = 'responding', text if advisor else text[:160]
                 stop = message.get('stopReason')
                 if stop == 'stop':
                     if advisor:
-                        state.event({'type': 'advisor', 'model': target.model, 'active': False, 'detail': 'OMP advisor review returned'})
+                        if state.reviews and state.reviews[-1].active:
+                            detail = target.detail if target.state == 'responding' else 'OMP advisor review returned'
+                            state.event({'type': 'advisor', 'model': target.model, 'active': False, 'detail': detail})
                     else:
                         state.event({'type': 'done' if agent_id == 'main' else 'agent_end', 'agent_id': agent_id, 'detail': 'OMP turn completed'})
                 elif stop in ('error', 'aborted'):
@@ -625,7 +664,8 @@ def render(state, width, height, frame, mode, paused=False, page=0):
     advisor_usage = usage_text(state.advisor, compact=True)
     if advisor_usage:
         c.center(ox + 1, 9, side - 2, advisor_usage, 'muted')
-    c.text(ox + 2, 10, fit(state.advisor.state, side - 4), 'text')
+    advisor_status = 'review ended' if state.advisor.state == 'done' else state.advisor.state
+    c.text(ox + 2, 10, fit(advisor_status, side - 4), 'text')
     reviews = list(state.reviews)[-3:]
     for i in range(3):
         y = 13 + i * 3
@@ -811,11 +851,14 @@ def main():
     start = time.monotonic()
 
     def update(elapsed):
+        nonlocal state
         try:
             state.error = ''
             if demo:
                 demo.poll(state, elapsed)
             elif events:
+                if events.replaced():
+                    state = State()
                 for event in events.poll():
                     try:
                         state.event(event)

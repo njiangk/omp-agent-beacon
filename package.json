@@ -1,6 +1,6 @@
 {
   "name": "omp-agent-beacon",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Live terminal diagram of an omp session: main model, subagents, advisor reviews, tools, tokens and cost.",
   "type": "module",
   "license": "MIT",
@@ -15,6 +15,7 @@
     "omp-extension.ts",
     "native-view.ts",
     "beacon.py",
+    "docs/preview-tern-native.png",
     "README.md",
     "LICENSE"
   ],

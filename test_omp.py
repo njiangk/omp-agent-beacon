@@ -86,6 +86,11 @@ class OmpSourceTests(unittest.TestCase):
         self.assertFalse(self.state.reviews[0].active)
         self.assertEqual(self.state.advisor.calls, 1)
         self.assertEqual(self.state.advisor.detail, 'split the payment step first')
+        self.source.consume(self.state, message('assistant', stopReason='stop', content=[
+            {'type': 'text', 'text': 'trailing completion'},
+        ]), '__advisor')
+        self.assertEqual([r.detail for r in self.state.reviews], ['split the payment step first'])
+        self.assertEqual(self.state.advisor.detail, 'split the payment step first')
         self.source.consume(self.state, message('assistant', stopReason='stop', content=[]), 'search')
         self.state.agents['search'].state = 'running'
         self.state.main.state = 'idle'
@@ -108,6 +113,39 @@ class OmpSourceTests(unittest.TestCase):
         self.source.consume(self.state, message('toolResult', toolCallId='a2', toolName='advise', isError=False), '__advisor')
         self.assertEqual([r.detail for r in self.state.reviews], ['first', 'second'])
         self.assertEqual(self.state.advisor.calls, 2)
+
+    def test_advisor_events_do_not_start_main_clock(self):
+        self.state.event({'type': 'advisor', 'model': 'reviewer', 'detail': 'reviewing'})
+        self.assertEqual(self.state.main.started, 0)
+        self.assertGreater(self.state.advisor.started, 0)
+        self.assertGreater(self.state.advisor.updated, 0)
+
+    def test_plain_text_advisor_closes_review_with_its_answer(self):
+        self.source.consume(self.state, message('user', content=[]), '__advisor')
+        self.source.consume(self.state, message('assistant', stopReason='stop', content=[
+            {'type': 'text', 'text': 'check the boundary'},
+        ]), '__advisor')
+        self.assertEqual(self.state.advisor.state, 'done')
+        self.assertEqual(self.state.reviews[-1].detail, 'check the boundary')
+        self.assertFalse(self.state.reviews[-1].active)
+
+    def test_long_advisor_answers_are_preserved_for_expansion(self):
+        answer = 'Check every boundary before returning the summary. ' * 12 + 'FINAL FINDING'
+        for use_tool in (True, False):
+            with self.subTest(use_tool=use_tool):
+                state, source = State(), OmpSource('/unused')
+                source.consume(state, message('user', content=[]), '__advisor')
+                if use_tool:
+                    source.consume(state, message('assistant', content=[{
+                        'type': 'toolCall', 'id': 'advice', 'name': 'advise', 'arguments': {'note': answer},
+                    }]), '__advisor')
+                    source.consume(state, message('toolResult', toolCallId='advice', toolName='advise'), '__advisor')
+                else:
+                    source.consume(state, message('assistant', stopReason='stop', content=[
+                        {'type': 'text', 'text': answer},
+                    ]), '__advisor')
+                self.assertEqual(state.advisor.detail, answer)
+                self.assertEqual(state.reviews[-1].detail, answer)
 
     def test_usage_accumulates_per_agent_and_ignores_invalid_numbers(self):
         self.source.consume(self.state, message('assistant', model='main-model', content=[], usage={
@@ -134,6 +172,17 @@ class OmpSourceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.state.event({'type': 'usage', 'tokens': -1})
         self.assertEqual(self.state.main.tokens, 0)
+        for value in (-1, float('nan'), float('inf'), True, '100'):
+            for field in ('tokens', 'cost'):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.state.event({'type': 'usage', 'agent_id': 'invalid', field: value})
+        self.assertNotIn('invalid', self.state.agents)
+        self.assertEqual(self.state.main.started, 0)
+
+    def test_boolean_progress_does_not_create_an_agent(self):
+        with self.assertRaises(ValueError):
+            self.state.event({'type': 'progress', 'agent_id': 'invalid', 'completed': True, 'total': 10})
+        self.assertNotIn('invalid', self.state.agents)
 
 
 class ClaudeSourceTests(unittest.TestCase):
@@ -165,6 +214,101 @@ class ClaudeSourceTests(unittest.TestCase):
 
             source.poll(state)
             self.assertEqual(state.main.tokens, 137)
+
+    def test_parallel_tools_remain_running_and_duplicate_calls_are_ignored(self):
+        from beacon import ClaudeSource
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory) / 'session.jsonl'
+            calls = {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'a', 'name': 'Read'},
+                {'type': 'tool_use', 'id': 'b', 'name': 'Bash'},
+            ]}}
+            first_result = {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 'a'},
+            ]}}
+            session.write_text(''.join(json.dumps(row) + '\n' for row in [calls, calls, first_result]))
+            source, state = ClaudeSource(session), State()
+            source.poll(state)
+            self.assertEqual(state.main.tools, 2)
+            self.assertEqual(state.main.state, 'running')
+            self.assertEqual(state.main.role, 'main')
+            with session.open('a') as stream:
+                stream.write(json.dumps({'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'b'},
+                ]}}) + '\n')
+            source.poll(state)
+            self.assertEqual(state.main.state, 'waiting')
+
+    def test_matching_message_ids_in_different_agents_are_not_deduplicated(self):
+        from beacon import ClaudeSource
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory) / 'session.jsonl'
+            row = {'type': 'assistant', 'message': {'id': 'same', 'content': [],
+                   'usage': {'input_tokens': 100, 'output_tokens': 20}}}
+            session.write_text(json.dumps(row) + '\n')
+            child = session.parent / session.stem / 'subagents' / 'agent-child.jsonl'
+            child.parent.mkdir(parents=True)
+            child.write_text(json.dumps(row) + '\n')
+            source, state = ClaudeSource(session), State()
+            source.poll(state)
+            self.assertEqual(state.main.tokens, 120)
+            self.assertEqual(state.agents['agent-child'].tokens, 120)
+
+
+class TranscriptResetTests(unittest.TestCase):
+    def test_replacement_and_truncation_rebuild_usage(self):
+        from beacon import ClaudeSource
+        for source_type in (OmpSource, ClaudeSource):
+            with self.subTest(source=source_type.__name__), tempfile.TemporaryDirectory() as directory:
+                session = Path(directory) / 'session.jsonl'
+                def row(tokens):
+                    if source_type is OmpSource:
+                        return message('assistant', content=[], usage={'totalTokens': tokens})
+                    return {'type': 'assistant', 'message': {'id': str(tokens), 'content': [],
+                            'usage': {'input_tokens': tokens}}}
+                session.write_text(json.dumps(row(100)) + '\n' + json.dumps(row(200)) + '\n')
+                source, state = source_type(session), State()
+                source.poll(state)
+                self.assertEqual(state.main.tokens, 300)
+                replacement = session.with_suffix('.new')
+                replacement.write_text(session.read_text())
+                replacement.replace(session)
+                source.poll(state)
+                self.assertEqual(state.main.tokens, 300)
+                session.write_text(json.dumps(row(50)) + '\n')
+                source.poll(state)
+                self.assertEqual(state.main.tokens, 50)
+
+    def test_deleted_log_does_not_block_discovery_of_new_session(self):
+        from beacon import ClaudeSource
+        for source_type in (OmpSource, ClaudeSource):
+            with self.subTest(source=source_type.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                project = root / 'project'
+                project.mkdir()
+                def row(tokens):
+                    if source_type is OmpSource:
+                        return message('assistant', content=[], usage={'totalTokens': tokens})
+                    return {'type': 'assistant', 'message': {'id': str(tokens), 'content': [],
+                            'usage': {'input_tokens': tokens}}}
+                old = project / 'old.jsonl'
+                old.write_text(json.dumps(row(100)) + '\n')
+                source, state = source_type(root), State()
+                source.poll(state)
+                self.assertEqual(state.main.tokens, 100)
+                old.unlink()
+                source.poll(state)
+                self.assertNotIn(old, source.readers)
+                new = project / 'new.jsonl'
+                new.write_text(json.dumps(row(250)) + '\n')
+                source.scan_at = 0
+                source.poll(state)
+                self.assertEqual(source.session, new)
+                self.assertEqual(state.main.tokens, 250)
+                with new.open('a') as stream:
+                    stream.write(json.dumps(row(50)) + '\n')
+                source.poll(state)
+                self.assertEqual(state.main.tokens, 300)
 
 
 if __name__ == '__main__':

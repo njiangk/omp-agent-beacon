@@ -64,14 +64,24 @@ function usageLine(agent: BeaconAgent, compact = false): NativeNode | null {
   return parts.length ? line([span(parts.join(" · "), "mono")]) : null;
 }
 
-function agentCard(agent: BeaconAgent, head: string, index = -1, extra: NativeNode[] = []): NativeNode {
+function agentCard(agent: BeaconAgent, head: string, index = -1, extra: NativeNode[] = [], advisorExpanded = false): NativeNode {
   const tone = ROLE[agent.role];
   const status = agent.state === "done" ? "done" : agent.state === "error" ? "error"
     : ["running", "responding", "consulting"].includes(agent.state) ? "running" : "pending";
   const label = index >= 0 ? `${String(index).padStart(2, "0")} ${head}` : head;
+  const advisor = agent.role === "advisor";
+  const reviewStatus = agent.state === "done" ? "审查已结束" : agent.state === "error" ? "审查失败"
+    : status === "running" ? "审查中" : agent.state === "not connected" ? "未连接" : "等待审查";
   const content: NativeNode[] = [
-    line([span(agent.model, tone)]),
-    line([span(agent.detail, "muted")]),
+    line([span(agent.model, `${tone} strong`)]),
+    ...(advisor ? [{ k: "badge", p: { text: reviewStatus, tone: agent.state === "done" ? "success"
+      : agent.state === "error" ? "error" : "accent",
+      title: agent.state === "done" ? "仅表示本次顾问咨询结束，不代表建议中的问题已解决。" : undefined } } as NativeNode] : []),
+    ...(advisor && agent.detail ? [{ k: "button", key: "advisor-detail", p: {
+      text: advisorExpanded ? "收起全文" : "展开全文", actions: { click: "advisor-detail" },
+    } } as NativeNode] : []),
+    { k: "text", key: "detail", p: { spans: [span(agent.detail, "muted")], wrap: "word",
+      ...(advisor && !advisorExpanded ? { lines: 3, truncate: "end", max: { h: "3lines" } } : {}) } },
     ...extra,
   ];
   if (agent.progress !== null) {
@@ -82,15 +92,14 @@ function agentCard(agent: BeaconAgent, head: string, index = -1, extra: NativeNo
   }
   const usage = usageLine(agent);
   if (usage) content.push(usage);
-  content.push(line([span(agent.state, "dim")]));
-  return { k: "card", key: `${agent.role}-${head}`, p: { head: label, tone, status, shrink: 0, max: { w: 1 } }, c: content };
+  return { k: "card", key: `${agent.role}-${head}`, p: { head: label, ...(advisor ? {} : { status }), tone, shrink: 0, max: { w: 1 } }, c: content };
 }
 
 const arrow = (label: string): NativeNode => ({
   k: "col", p: { align: "center", gap: "xs" }, c: [line([span(`↓  ${label}`, "info")])],
 });
 
-export function beaconScreen(view?: BeaconView): NativeScreen {
+export function beaconScreen(view?: BeaconView, advisorExpanded = false): NativeScreen {
   if (!view) return { role: "agent-beacon", main: [line([span("Starting Agent Beacon…", "muted")])], dock: [] };
   const spend = [view.main, view.advisor, ...view.agents].reduce(
     (sum, agent) => ({ tokens: sum.tokens + agent.tokens, cost: sum.cost + agent.cost }),
@@ -107,9 +116,9 @@ export function beaconScreen(view?: BeaconView): NativeScreen {
   const agents = view.agents.slice(page * 3, page * 3 + 3);
   const reviews = view.reviews.slice(-4);
   const advisor: NativeNode = {
-    k: "col", key: "advisor", p: { basis: 0.28, grow: 1, min: { w: "22ch" }, gap: "sm" },
+    k: "col", key: "advisor", p: { basis: 0.27, grow: 1, min: { w: "24ch" }, gap: "md" },
     c: [
-      agentCard(view.advisor, "ADVISOR"),
+      agentCard(view.advisor, "ADVISOR", -1, [], advisorExpanded),
       { k: "card", p: { head: "REVIEWS", meta: String(view.advisor.calls), tone: "accent", shrink: 0 }, c: reviews.length
         ? reviews.map(review => line([
           span(review.stamp, review.active ? "accent" : "dim"),
@@ -122,7 +131,7 @@ export function beaconScreen(view?: BeaconView): NativeScreen {
   const main = agentCard(view.main, "MAIN SESSION", -1, view.waiting ? [line([span(view.waiting, "accent")])] : []);
 
   const flow: NativeNode = {
-    k: "col", key: "flow", p: { basis: 0.66, grow: 3, min: { w: "28ch" }, gap: "sm" },
+    k: "col", key: "flow", p: { basis: 0.69, grow: 3, min: { w: "32ch" }, gap: "md" },
     c: [
       main,
       arrow("delegate"),
@@ -144,16 +153,17 @@ export function beaconScreen(view?: BeaconView): NativeScreen {
   return {
     role: "agent-beacon",
     main: [{
-      k: "col", key: "beacon", p: { gap: "md", max: { w: 1 } },
+      k: "col", key: "beacon", p: { gap: "lg", grow: 1, max: { w: 1 } },
       c: [
         { k: "row", p: { wrap: true, justify: "between", gap: "sm" }, c: [
-          line([span("AGENT BEACON", "strong")]),
+          { k: "col", p: { gap: "xs" }, c: [line([span("AGENT BEACON", "strong")]),
+            line([span("会话执行图 · 工具活动 · 用量", "muted")])] },
           line([span("■ main", "warning"), span("   "), span("■ subagents", "info"), span("   "), span("■ advisor", "accent")], "none"),
           { k: "badge", p: { text: view.mode.toUpperCase(), tone: view.mode.startsWith("demo") ? "warning" : "success" } },
         ] },
         { k: "row", p: { wrap: true, align: "stretch", gap: "md", shrink: 0 }, c: [advisor, flow] },
         { k: "card", key: "log", p: { head: "SESSION LOG · LIVE", shrink: 0 }, c: view.logs.length
-          ? [{ k: "col", p: { gap: "none" }, c: view.logs.slice(-6).map(([stamp, name, detail, role]) => line([
+          ? [{ k: "col", p: { gap: "xs" }, c: view.logs.slice(-8).map(([stamp, name, detail, role]) => line([
             span(`${stamp}  `, "dim"),
             span(name.padEnd(12, " "), ROLE[role as keyof typeof ROLE] ?? "info"),
             span(detail, "muted"),
@@ -173,9 +183,9 @@ export function beaconScreen(view?: BeaconView): NativeScreen {
 /** The custom-UI wrapper exposes describe(), even on hosts without describeScreen forwarding. */
 export function beaconOverlay(screen: NativeScreen): NativeNode {
   return {
-    k: "col", p: { gap: "sm", max: { w: 1 } },
+    k: "col", p: { gap: "md", grow: 1, min: { h: 0.88 }, max: { w: 1, h: 0.94 } },
     c: [
-      { k: "scroll", p: { max: { h: "34lines" }, shrink: 1 }, c: screen.main },
+      { k: "scroll", p: { max: { h: 0.84 }, grow: 1, shrink: 1 }, c: screen.main },
       { k: "row", p: { shrink: 0 }, c: screen.dock },
     ],
   };
